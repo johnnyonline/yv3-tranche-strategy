@@ -1,245 +1,323 @@
 // SPDX-License-Identifier: AGPL-3.0
-pragma solidity ^0.8.18;
+pragma solidity 0.8.23;
 
-import {BaseStrategy, ERC20} from "@tokenized-strategy/BaseStrategy.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
-// Import interfaces for many popular DeFi projects, or add your own!
-//import "../interfaces/<protocol>/<Interface>.sol";
+import {BaseStrategy} from "@tokenized-strategy/BaseStrategy.sol";
+import {TokenizedStrategyLib as TokenizedStrategy} from "@tokenized-strategy/libraries/TokenizedStrategyLib.sol";
+import {BaseHooks, BaseHealthCheck, ERC20} from "@periphery/Bases/Hooks/BaseHooks.sol";
+import {IVault} from "@yearn-vaults/interfaces/IVault.sol";
 
-/**
- * The `TokenizedStrategy` variable can be used to retrieve the strategies
- * specific storage data your contract.
- *
- *       i.e. uint256 totalAssets = TokenizedStrategy.totalAssets()
- *
- * This can not be used for write functions. Any TokenizedStrategy
- * variables that need to be updated post deployment will need to
- * come from an external call from the strategies specific `management`.
- */
+import {IStrategyInterface} from "./interfaces/IStrategyInterface.sol";
 
-// NOTE: To implement permissioned functions you can use the onlyManagement, onlyEmergencyAuthorized and onlyKeepers modifiers
+contract TrancheStrategy is BaseHooks {
 
-contract Strategy is BaseStrategy {
     using SafeERC20 for ERC20;
+    using SafeERC20 for IVault;
 
-    constructor(address _asset, string memory _name) BaseStrategy(_asset, _name) {}
+    // ===============================================================
+    // Structs
+    // ===============================================================
 
-    /*//////////////////////////////////////////////////////////////
-                NEEDED TO BE OVERRIDDEN BY STRATEGIST
-    //////////////////////////////////////////////////////////////*/
-
-    /**
-     * @dev Can deploy up to '_amount' of 'asset' in the yield source.
-     *
-     * This function is called at the end of a {deposit} or {mint}
-     * call. Meaning that unless a whitelist is implemented it will
-     * be entirely permissionless and thus can be sandwiched or otherwise
-     * manipulated.
-     *
-     * @param _amount The amount of 'asset' that the strategy can attempt
-     * to deposit in the yield source.
-     */
-    function _deployFunds(uint256 _amount) internal override {
-        // TODO: implement deposit logic EX:
-        //
-        //      lendingPool.deposit(address(asset), _amount ,0);
+    /// @notice A user's pending cooldown
+    /// @param cooldownEnd Timestamp the shares become withdrawable at
+    /// @param windowEnd Timestamp the shares stop being withdrawable at
+    /// @param shares Amount of shares cooling down
+    struct UserCooldown {
+        uint64 cooldownEnd;
+        uint64 windowEnd;
+        uint128 shares;
     }
 
-    /**
-     * @dev Should attempt to free the '_amount' of 'asset'.
-     *
-     * NOTE: The amount of 'asset' that is already loose has already
-     * been accounted for.
-     *
-     * This function is called during {withdraw} and {redeem} calls.
-     * Meaning that unless a whitelist is implemented it will be
-     * entirely permissionless and thus can be sandwiched or otherwise
-     * manipulated.
-     *
-     * Should not rely on asset.balanceOf(address(this)) calls other than
-     * for diff accounting purposes.
-     *
-     * Any difference between `_amount` and what is actually freed will be
-     * counted as a loss and passed on to the withdrawer. This means
-     * care should be taken in times of illiquidity. It may be better to revert
-     * if withdraws are simply illiquid so not to realize incorrect losses.
-     *
-     * @param _amount, The amount of 'asset' to be freed.
-     */
-    function _freeFunds(uint256 _amount) internal override {
-        // TODO: implement withdraw logic EX:
-        //
-        //      lendingPool.withdraw(address(asset), _amount);
+    // ===============================================================
+    // Events
+    // ===============================================================
+
+    event JuniorSet(address indexed junior);
+    event PremiumSet(uint256 premium);
+    event CooldownSet(uint256 cooldownDuration, uint256 withdrawalWindow);
+    event CooldownStarted(address indexed user, uint256 shares, uint256 cooldownEnd, uint256 windowEnd);
+    event CooldownCancelled(address indexed user);
+
+    // ===============================================================
+    // Constants
+    // ===============================================================
+
+    /// @notice Longest cooldown management can set
+    uint256 public constant MAX_COOLDOWN_DURATION = 90 days;
+
+    /// @notice Shortest withdrawal window management can set
+    uint256 public constant MIN_WITHDRAWAL_WINDOW = 7 days;
+
+    /// @notice Yearn V3 vault every tranche is invested in
+    IVault public immutable VAULT;
+
+    /// @notice Tranche directly above this one, the only caller of `cover`. Zero for the most senior
+    IStrategyInterface public immutable SENIOR;
+
+    // ===============================================================
+    // Storage
+    // ===============================================================
+
+    /// @notice Symbol of the tranche. Replaces the TokenizedStrategy default
+    string public symbol;
+
+    /// @notice Share of reported profit passed down to `junior`, in basis points
+    uint256 public premium;
+
+    /// @notice Seconds between `startCooldown` and the shares becoming withdrawable. Zero means no cooldown
+    uint256 public cooldownDuration;
+
+    /// @notice Seconds the shares stay withdrawable for once their cooldown is over
+    uint256 public withdrawalWindow;
+
+    /// @notice Tranche directly below this one, which pays cover before this one does. Zero for the most junior
+    IStrategyInterface public junior;
+
+    /// @notice Pending cooldown of each user
+    mapping(address => UserCooldown) public cooldowns;
+
+    // ===============================================================
+    // Constructor
+    // ===============================================================
+
+    /// @param _asset Address of the vault's asset
+    /// @param _name Name of the tranche
+    /// @param _symbol Symbol of the tranche
+    /// @param _vault Address of the vault every tranche is invested in
+    /// @param _senior Address of the tranche directly above this one, zero for the most senior
+    constructor(
+        address _asset,
+        string memory _name,
+        string memory _symbol,
+        address _vault,
+        address _senior
+    ) BaseHealthCheck(_asset, _name) {
+        VAULT = IVault(_vault);
+        require(VAULT.asset() == _asset, "!vault");
+
+        SENIOR = IStrategyInterface(_senior);
+        require(_senior == address(0) || SENIOR.VAULT() == _vault, "!senior");
+
+        symbol = _symbol;
+
+        // Let the vault pull `asset`
+        asset.forceApprove(_vault, type(uint256).max);
     }
 
-    /**
-     * @dev Internal function to harvest all rewards, redeploy any idle
-     * funds and return an accurate accounting of all funds currently
-     * held by the Strategy.
-     *
-     * This should do any needed harvesting, rewards selling, accrual,
-     * redepositing etc. to get the most accurate view of current assets.
-     *
-     * NOTE: All applicable assets including loose assets should be
-     * accounted for in this function.
-     *
-     * Care should be taken when relying on oracles or swap values rather
-     * than actual amounts as all Strategy profit/loss accounting will
-     * be done based on this returned value.
-     *
-     * This can still be called post a shutdown, a strategist can check
-     * `TokenizedStrategy.isShutdown()` to decide if funds should be
-     * redeployed or simply realize any profits/losses.
-     *
-     * @return _totalAssets A trusted and accurate account for the total
-     * amount of 'asset' the strategy currently holds including idle funds.
-     */
-    function _harvestAndReport() internal override returns (uint256 _totalAssets) {
-        // TODO: Implement harvesting logic and accurate accounting EX:
-        //
-        //      if(!TokenizedStrategy.isShutdown()) {
-        //          _claimAndSellRewards();
-        //      }
-        //      _totalAssets = aToken.balanceOf(address(this)) + asset.balanceOf(address(this));
-        //
-        _totalAssets = asset.balanceOf(address(this));
-    }
+    // ===============================================================
+    // View functions
+    // ===============================================================
 
-    /*//////////////////////////////////////////////////////////////
-                    OPTIONAL TO OVERRIDE BY STRATEGIST
-    //////////////////////////////////////////////////////////////*/
-
-    /**
-     * @notice Gets the max amount of `asset` that can be withdrawn.
-     * @dev Defaults to an unlimited amount for any address. But can
-     * be overridden by strategists.
-     *
-     * This function will be called before any withdraw or redeem to enforce
-     * any limits desired by the strategist. This can be used for illiquid
-     * or sandwichable strategies.
-     *
-     *   EX:
-     *       return asset.balanceOf(yieldSource);
-     *
-     * This does not need to take into account the `_owner`'s share balance
-     * or conversion rates from shares to assets.
-     *
-     * @param . The address that is withdrawing from the strategy.
-     * @return . The available amount that can be withdrawn in terms of `asset`
-     */
-    function availableWithdrawLimit(
-        address /*_owner*/
-    )
-        public
-        view
-        override
-        returns (uint256)
-    {
-        // NOTE: Withdraw limitations such as liquidity constraints should be accounted for HERE
-        //  rather than _freeFunds in order to not count them as losses on withdraws.
-
-        // TODO: If desired implement withdraw limit logic and any needed state variables.
-
-        // EX:
-        // if(yieldSource.notShutdown()) {
-        //    return asset.balanceOf(address(this)) + asset.balanceOf(yieldSource);
-        // }
+    /// @notice Idle `asset` held by the tranche
+    /// @return Amount of `asset`
+    function balanceOfAsset() public view returns (uint256) {
         return asset.balanceOf(address(this));
     }
 
-    /**
-     * @notice Gets the max amount of `asset` that an address can deposit.
-     * @dev Defaults to an unlimited amount for any address. But can
-     * be overridden by strategists.
-     *
-     * This function will be called before any deposit or mints to enforce
-     * any limits desired by the strategist. This can be used for either a
-     * traditional deposit limit or for implementing a whitelist etc.
-     *
-     *   EX:
-     *      if(isAllowed[_owner]) return super.availableDepositLimit(_owner);
-     *
-     * This does not need to take into account any conversion rates
-     * from shares to assets. But should know that any non max uint256
-     * amounts may be converted to shares. So it is recommended to keep
-     * custom amounts low enough as not to cause overflow when multiplied
-     * by `totalSupply`.
-     *
-     * @param . The address that is depositing into the strategy.
-     * @return . The available amount the `_owner` can deposit in terms of `asset`
-     *
-     * function availableDepositLimit(
-     *     address _owner
-     * ) public view override returns (uint256) {
-     *     TODO: If desired Implement deposit limit logic and any needed state variables .
-     *
-     *     EX:
-     *         uint256 totalAssets = TokenizedStrategy.totalAssets();
-     *         return totalAssets >= depositLimit ? 0 : depositLimit - totalAssets;
-     * }
-     */
+    /// @notice Vault shares held by the tranche
+    /// @return Amount of vault shares
+    function balanceOfVault() public view returns (uint256) {
+        return VAULT.balanceOf(address(this));
+    }
 
-    /**
-     * @dev Optional function for strategist to override that can
-     *  be called in between reports.
-     *
-     * If '_tend' is used tendTrigger() will also need to be overridden.
-     *
-     * This call can only be called by a permissioned role so may be
-     * through protected relays.
-     *
-     * This can be used to harvest and compound rewards, deposit idle funds,
-     * perform needed position maintenance or anything else that doesn't need
-     * a full report for.
-     *
-     *   EX: A strategy that can not deposit funds without getting
-     *       sandwiched can use the tend when a certain threshold
-     *       of idle to totalAssets has been reached.
-     *
-     * This will have no effect on PPS of the strategy till report() is called.
-     *
-     * @param _totalIdle The current amount of idle funds that are available to deploy.
-     *
-     * function _tend(uint256 _totalIdle) internal override {}
-     */
+    /// @notice What the tranche's vault shares are worth
+    /// @return Amount of `asset`
+    function valueOfVault() public view returns (uint256) {
+        return VAULT.convertToAssets(balanceOfVault());
+    }
 
-    /**
-     * @dev Optional trigger to override if tend() will be used by the strategy.
-     * This must be implemented if the strategy hopes to invoke _tend().
-     *
-     * @return . Should return true if tend() should be called by keeper or false if not.
-     *
-     * function _tendTrigger() internal view override returns (bool) {}
-     */
+    /// @inheritdoc BaseStrategy
+    function availableDepositLimit(
+        address _owner
+    ) public view override returns (uint256) {
+        return Math.min(BaseHealthCheck.availableDepositLimit(_owner), VAULT.maxDeposit(address(this)));
+    }
 
-    /**
-     * @dev Optional function for a strategist to override that will
-     * allow management to manually withdraw deployed funds from the
-     * yield source if a strategy is shutdown.
-     *
-     * This should attempt to free `_amount`, noting that `_amount` may
-     * be more than is currently deployed.
-     *
-     * NOTE: This will not realize any profits or losses. A separate
-     * {report} will be needed in order to record any profit/loss. If
-     * a report may need to be called after a shutdown it is important
-     * to check if the strategy is shutdown during {_harvestAndReport}
-     * so that it does not simply re-deploy all funds that had been freed.
-     *
-     * EX:
-     *   if(freeAsset > 0 && !TokenizedStrategy.isShutdown()) {
-     *       depositFunds...
-     *    }
-     *
-     * @param _amount The amount of asset to attempt to free.
-     *
-     * function _emergencyWithdraw(uint256 _amount) internal override {
-     *     TODO: If desired implement simple logic to free deployed funds.
-     *
-     *     EX:
-     *         _amount = min(_amount, aToken.balanceOf(address(this)));
-     *         _freeFunds(_amount);
-     * }
-     */
+    /// @inheritdoc BaseStrategy
+    function availableWithdrawLimit(
+        address _owner
+    ) public view override returns (uint256) {
+        // What the vault can pay out right now, whatever the loss
+        uint256 _limit = balanceOfAsset() + VAULT.maxWithdraw(address(this), MAX_BPS);
+
+        if (cooldownDuration == 0 || TokenizedStrategy.isShutdown()) return _limit;
+
+        // Only shares whose cooldown is over, and whose window is still open, can leave
+        UserCooldown memory _cooldown = cooldowns[_owner];
+        if (_cooldown.shares == 0) return 0;
+        if (block.timestamp < _cooldown.cooldownEnd || block.timestamp > _cooldown.windowEnd) return 0;
+
+        // Round up so that all of the cooled shares can be redeemed
+        return Math.min(_limit, TokenizedStrategy.previewMint(_cooldown.shares));
+    }
+
+    // ===============================================================
+    // Management functions
+    // ===============================================================
+
+    /// @notice Set the tranche directly below this one
+    /// @dev It must have been deployed with this tranche as its `SENIOR`
+    /// @param _junior Address of the junior tranche, zero for none
+    function setJunior(
+        address _junior
+    ) external onlyManagement {
+        require(_junior == address(0) || IStrategyInterface(_junior).SENIOR() == address(this), "!junior");
+        junior = IStrategyInterface(_junior);
+        emit JuniorSet(_junior);
+    }
+
+    /// @notice Set the share of reported profit passed down to `junior`
+    /// @param _premium Share of the profit in basis points
+    function setPremium(
+        uint256 _premium
+    ) external onlyManagement {
+        require(_premium <= MAX_BPS, "!premium");
+        premium = _premium;
+        emit PremiumSet(_premium);
+    }
+
+    /// @notice Set the cooldown users go through before withdrawing
+    /// @dev A duration of zero means no cooldown. Cooldowns already started keep their timestamps
+    /// @param _cooldownDuration Seconds between `startCooldown` and the shares becoming withdrawable
+    /// @param _withdrawalWindow Seconds the shares stay withdrawable for once their cooldown is over
+    function setCooldown(
+        uint256 _cooldownDuration,
+        uint256 _withdrawalWindow
+    ) external onlyManagement {
+        require(_cooldownDuration <= MAX_COOLDOWN_DURATION, "!duration");
+        require(_withdrawalWindow >= MIN_WITHDRAWAL_WINDOW, "!window");
+        cooldownDuration = _cooldownDuration;
+        withdrawalWindow = _withdrawalWindow;
+        emit CooldownSet(_cooldownDuration, _withdrawalWindow);
+    }
+
+    // ===============================================================
+    // Tranche functions
+    // ===============================================================
+
+    /// @notice Pay cover to the tranche above, taking it from the tranches below first
+    /// @dev Pays whatever it holds when it cannot pay in full
+    /// @param _assets Amount of `asset` the tranche above is short of
+    function cover(
+        uint256 _assets
+    ) external {
+        require(msg.sender == address(SENIOR), "!senior");
+
+        // The most junior tranche pays first
+        if (address(junior) != address(0)) junior.cover(_assets);
+
+        // Round up so the tranche above is not left a wei short
+        uint256 _shares = Math.min(VAULT.previewWithdraw(_assets), balanceOfVault());
+        VAULT.safeTransfer(msg.sender, _shares);
+    }
+
+    // ===============================================================
+    // Cooldown functions
+    // ===============================================================
+
+    /// @notice Start a cooldown on some of the caller's shares
+    /// @dev Replaces any cooldown the caller already has
+    /// @param _shares Amount of shares to cool down
+    function startCooldown(
+        uint256 _shares
+    ) external {
+        require(cooldownDuration != 0, "!cooldown");
+        require(_shares != 0 && _shares <= type(uint128).max, "!shares");
+        require(_shares <= TokenizedStrategy.balanceOf(msg.sender), "!balance");
+
+        uint256 _cooldownEnd = block.timestamp + cooldownDuration;
+        uint256 _windowEnd = _cooldownEnd + withdrawalWindow;
+        cooldowns[msg.sender] =
+            UserCooldown({cooldownEnd: uint64(_cooldownEnd), windowEnd: uint64(_windowEnd), shares: uint128(_shares)});
+
+        emit CooldownStarted(msg.sender, _shares, _cooldownEnd, _windowEnd);
+    }
+
+    /// @notice Cancel the caller's cooldown
+    function cancelCooldown() external {
+        require(cooldowns[msg.sender].shares != 0, "!pending");
+        delete cooldowns[msg.sender];
+        emit CooldownCancelled(msg.sender);
+    }
+
+    // ===============================================================
+    // Internal mutated functions
+    // ===============================================================
+
+    /// @inheritdoc BaseStrategy
+    function _deployFunds(
+        uint256 _amount
+    ) internal override {
+        VAULT.deposit(_amount, address(this));
+    }
+
+    /// @inheritdoc BaseStrategy
+    function _freeFunds(
+        uint256 _amount
+    ) internal override {
+        // Get topped up by the junior tranches before anyone is paid out
+        _pullCover();
+
+        // Redeem the vault shares that cover `_amount`
+        uint256 _shares = Math.min(VAULT.previewWithdraw(_amount), balanceOfVault());
+        VAULT.redeem(_shares, address(this), address(this));
+    }
+
+    /// @inheritdoc BaseStrategy
+    function _harvestAndReport() internal override returns (uint256) {
+        // Get topped up by the junior tranches
+        _pullCover();
+
+        // Pass a share of the profit down to the junior tranches
+        uint256 _owed = TokenizedStrategy.lastTotalAssets();
+        uint256 _held = balanceOfAsset() + valueOfVault();
+        if (_held > _owed && address(junior) != address(0)) {
+            uint256 _shares = VAULT.convertToShares((_held - _owed) * premium / MAX_BPS);
+            VAULT.safeTransfer(address(junior), _shares);
+        }
+
+        return balanceOfAsset() + valueOfVault();
+    }
+
+    /// @notice Pull cover from the junior tranches if this tranche holds less than it accounts for
+    function _pullCover() internal {
+        if (address(junior) == address(0)) return;
+
+        uint256 _owed = TokenizedStrategy.lastTotalAssets();
+        uint256 _held = balanceOfAsset() + valueOfVault();
+        if (_held < _owed) junior.cover(_owed - _held);
+    }
+
+    /// @notice Reduce the owner's cooldown by the shares they just redeemed
+    function _postWithdrawHook(
+        uint256, /*_assets*/
+        uint256 _shares,
+        address, /*_receiver*/
+        address _owner,
+        uint256 /*_maxLoss*/
+    ) internal override {
+        UserCooldown storage _cooldown = cooldowns[_owner];
+        if (_cooldown.shares == 0) return;
+
+        if (_shares >= _cooldown.shares) delete cooldowns[_owner];
+        else _cooldown.shares -= uint128(_shares);
+    }
+
+    /// @notice Block the transfer of shares that are cooling down
+    function _preTransferHook(
+        address _from,
+        address, /*_to*/
+        uint256 _amount
+    ) internal view override {
+        if (cooldownDuration == 0 || TokenizedStrategy.isShutdown()) return;
+
+        UserCooldown memory _cooldown = cooldowns[_from];
+        if (_cooldown.shares == 0 || block.timestamp > _cooldown.windowEnd) return;
+
+        uint256 _balance = TokenizedStrategy.balanceOf(_from);
+        require(_balance >= _cooldown.shares + _amount, "!transfer");
+    }
+
 }
