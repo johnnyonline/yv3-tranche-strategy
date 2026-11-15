@@ -50,26 +50,26 @@ contract SettersTest is Setup {
 
     function test_setCooldown() public {
         assertEq(trancheB.MAX_COOLDOWN_DURATION(), 90 days, "!MAX_COOLDOWN_DURATION");
-        assertEq(trancheB.MIN_WITHDRAWAL_WINDOW(), 7 days, "!MIN_WITHDRAWAL_WINDOW");
+        assertEq(trancheB.WITHDRAWAL_WINDOW(), 7 days, "!WITHDRAWAL_WINDOW");
 
         vm.prank(user);
         vm.expectRevert("!management");
-        trancheB.setCooldown(7 days, 7 days);
+        trancheB.setCooldown(7 days);
 
         vm.startPrank(management);
 
+        // The most senior tranche never has a cooldown
+        vm.expectRevert("!senior");
+        trancheA.setCooldown(7 days);
+
         vm.expectRevert("!duration");
-        trancheB.setCooldown(90 days + 1, 7 days);
+        trancheB.setCooldown(90 days + 1);
 
-        vm.expectRevert("!window");
-        trancheB.setCooldown(7 days, 7 days - 1);
-
-        trancheB.setCooldown(90 days, 10 days);
+        trancheB.setCooldown(90 days);
         assertEq(trancheB.cooldownDuration(), 90 days, "!duration");
-        assertEq(trancheB.withdrawalWindow(), 10 days, "!window");
 
         // No cooldown at all
-        trancheB.setCooldown(0, 7 days);
+        trancheB.setCooldown(0);
         assertEq(trancheB.cooldownDuration(), 0, "!off");
 
         vm.stopPrank();

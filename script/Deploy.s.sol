@@ -59,9 +59,9 @@ contract Deploy is Script {
         s_trancheE = _newTranche("Tranche E", "yvUSD-E", address(s_trancheB));
 
         // init tranches. Cover is pulled up E -> B -> A, premiums are passed down A -> B -> E
-        _initTranche(s_trancheA, address(s_trancheB), PREMIUM_A, 0, 0); // No cooldown
-        _initTranche(s_trancheB, address(s_trancheE), PREMIUM_B, 14 days, 7 days);
-        _initTranche(s_trancheE, address(0), 0, 30 days, 7 days);
+        _initTranche(s_trancheA, address(s_trancheB), PREMIUM_A, 0); // No cooldown
+        _initTranche(s_trancheB, address(s_trancheE), PREMIUM_B, 14 days);
+        _initTranche(s_trancheE, address(0), 0, 30 days);
 
         vm.stopBroadcast();
 
@@ -85,13 +85,12 @@ contract Deploy is Script {
         IStrategyInterface _tranche,
         address _junior,
         uint256 _premium,
-        uint256 _cooldownDuration,
-        uint256 _withdrawalWindow
+        uint256 _cooldownDuration
     ) internal {
         _tranche.acceptManagement();
         _tranche.setJunior(_junior);
         _tranche.setPremium(_premium);
-        if (_cooldownDuration != 0) _tranche.setCooldown(_cooldownDuration, _withdrawalWindow);
+        if (_cooldownDuration != 0) _tranche.setCooldown(_cooldownDuration);
         _tranche.setProfitMaxUnlockTime(2 days);
         _tranche.setPerformanceFee(0);
         _tranche.setOpen(true);

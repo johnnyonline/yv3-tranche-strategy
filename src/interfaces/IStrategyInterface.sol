@@ -11,7 +11,7 @@ interface IStrategyInterface is IBaseHealthCheck {
 
     function MAX_COOLDOWN_DURATION() external view returns (uint256);
 
-    function MIN_WITHDRAWAL_WINDOW() external view returns (uint256);
+    function WITHDRAWAL_WINDOW() external view returns (uint256);
 
     function SENIOR() external view returns (address);
 
@@ -20,8 +20,6 @@ interface IStrategyInterface is IBaseHealthCheck {
     function premium() external view returns (uint256);
 
     function cooldownDuration() external view returns (uint256);
-
-    function withdrawalWindow() external view returns (uint256);
 
     function junior() external view returns (address);
 
@@ -48,8 +46,7 @@ interface IStrategyInterface is IBaseHealthCheck {
     ) external;
 
     function setCooldown(
-        uint256 _cooldownDuration,
-        uint256 _withdrawalWindow
+        uint256 _cooldownDuration
     ) external;
 
     // ===============================================================

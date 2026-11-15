@@ -36,7 +36,7 @@ contract TrancheStrategy is BaseHooks {
 
     event JuniorSet(address indexed junior);
     event PremiumSet(uint256 premium);
-    event CooldownSet(uint256 cooldownDuration, uint256 withdrawalWindow);
+    event CooldownSet(uint256 cooldownDuration);
     event CooldownStarted(address indexed user, uint256 shares, uint256 cooldownEnd, uint256 windowEnd);
     event CooldownCancelled(address indexed user);
 
@@ -47,8 +47,8 @@ contract TrancheStrategy is BaseHooks {
     /// @notice Longest cooldown management can set
     uint256 public constant MAX_COOLDOWN_DURATION = 90 days;
 
-    /// @notice Shortest withdrawal window management can set
-    uint256 public constant MIN_WITHDRAWAL_WINDOW = 7 days;
+    /// @notice Seconds the shares stay withdrawable for once their cooldown is over
+    uint256 public constant WITHDRAWAL_WINDOW = 7 days;
 
     /// @notice Yearn V3 vault every tranche is invested in
     IVault public immutable VAULT;
@@ -68,9 +68,6 @@ contract TrancheStrategy is BaseHooks {
 
     /// @notice Seconds between `startCooldown` and the shares becoming withdrawable. Zero means no cooldown
     uint256 public cooldownDuration;
-
-    /// @notice Seconds the shares stay withdrawable for once their cooldown is over
-    uint256 public withdrawalWindow;
 
     /// @notice Tranche directly below this one, which pays cover before this one does. Zero for the most junior
     IStrategyInterface public junior;
@@ -179,18 +176,15 @@ contract TrancheStrategy is BaseHooks {
     }
 
     /// @notice Set the cooldown users go through before withdrawing
-    /// @dev A duration of zero means no cooldown. Cooldowns already started keep their timestamps
+    /// @dev Not for the most senior tranche. Zero means no cooldown. Cooldowns already started keep their timestamps
     /// @param _cooldownDuration Seconds between `startCooldown` and the shares becoming withdrawable
-    /// @param _withdrawalWindow Seconds the shares stay withdrawable for once their cooldown is over
     function setCooldown(
-        uint256 _cooldownDuration,
-        uint256 _withdrawalWindow
+        uint256 _cooldownDuration
     ) external onlyManagement {
+        require(address(SENIOR) != address(0), "!senior");
         require(_cooldownDuration <= MAX_COOLDOWN_DURATION, "!duration");
-        require(_withdrawalWindow >= MIN_WITHDRAWAL_WINDOW, "!window");
         cooldownDuration = _cooldownDuration;
-        withdrawalWindow = _withdrawalWindow;
-        emit CooldownSet(_cooldownDuration, _withdrawalWindow);
+        emit CooldownSet(_cooldownDuration);
     }
 
     // ===============================================================
@@ -228,7 +222,7 @@ contract TrancheStrategy is BaseHooks {
         require(_shares <= TokenizedStrategy.balanceOf(msg.sender), "!balance");
 
         uint256 _cooldownEnd = block.timestamp + cooldownDuration;
-        uint256 _windowEnd = _cooldownEnd + withdrawalWindow;
+        uint256 _windowEnd = _cooldownEnd + WITHDRAWAL_WINDOW;
         cooldowns[msg.sender] =
             UserCooldown({cooldownEnd: uint64(_cooldownEnd), windowEnd: uint64(_windowEnd), shares: uint128(_shares)});
 

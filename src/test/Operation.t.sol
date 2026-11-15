@@ -15,11 +15,9 @@ contract OperationTest is Setup {
         assertTrue(address(0) != address(strategy));
         assertEq(address(strategy), address(trancheA));
 
-        _checkTranche(trancheA, "Tranche A", "yvUSD-A", address(0), address(trancheB), PREMIUM_A, 0, 0);
-        _checkTranche(
-            trancheB, "Tranche B", "yvUSD-B", address(trancheA), address(trancheE), PREMIUM_B, 14 days, 7 days
-        );
-        _checkTranche(trancheE, "Tranche E", "yvUSD-E", address(trancheB), address(0), 0, 30 days, 7 days);
+        _checkTranche(trancheA, "Tranche A", "yvUSD-A", address(0), address(trancheB), PREMIUM_A, 0);
+        _checkTranche(trancheB, "Tranche B", "yvUSD-B", address(trancheA), address(trancheE), PREMIUM_B, 14 days);
+        _checkTranche(trancheE, "Tranche E", "yvUSD-E", address(trancheB), address(0), 0, 30 days);
     }
 
     function test_setupVaultOK() public {
@@ -268,8 +266,7 @@ contract OperationTest is Setup {
         address _senior,
         address _junior,
         uint256 _premium,
-        uint256 _cooldownDuration,
-        uint256 _withdrawalWindow
+        uint256 _cooldownDuration
     ) internal {
         assertEq(_tranche.asset(), address(asset));
         assertEq(_tranche.name(), _name);
@@ -289,7 +286,6 @@ contract OperationTest is Setup {
         assertEq(_tranche.junior(), _junior);
         assertEq(_tranche.premium(), _premium);
         assertEq(_tranche.cooldownDuration(), _cooldownDuration);
-        assertEq(_tranche.withdrawalWindow(), _withdrawalWindow);
         assertEq(strategyFactory.deployments(address(vault), _senior), address(_tranche));
         assertEq(asset.allowance(address(_tranche), address(vault)), type(uint256).max);
     }
