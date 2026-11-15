@@ -189,7 +189,7 @@ contract WaterfallTest is Setup {
         assertEq(held(trancheE), trancheE.totalAssets(), "!held E");
     }
 
-    function test_loss_coverIsPulledBeforeAWithdrawal() public {
+    function test_loss_coverIsOnlyPulledAtAReport() public {
         // The vault books a 5% loss. No tranche has reported it yet
         lose(50_000e6);
         reportVault();
@@ -198,14 +198,21 @@ contract WaterfallTest is Setup {
         assertEq(trancheA.totalAssets(), DEPOSIT_A, "!totalAssets");
         assertApproxEqAbs(held(trancheA), DEPOSIT_A - 40_000e6, 2, "!held");
 
-        // Alice can take out what A holds. Her withdrawal pulls the cover first, so she is paid in full
+        // Alice can take out what A holds, in full. Her withdrawal pulls no cover
         uint256 _shares = trancheA.maxRedeem(alice);
         assertApproxEqAbs(_shares, DEPOSIT_A - 40_000e6, 2, "!maxRedeem");
         vm.prank(alice);
         trancheA.redeem(_shares, alice, alice);
         assertEq(asset.balanceOf(alice), _shares, "!first withdrawal");
+        assertApproxEqAbs(held(trancheB), DEPOSIT_B - 5_000e6, 3, "!held B before cover");
+        assertApproxEqAbs(held(trancheE), DEPOSIT_E - 5_000e6, 3, "!held E before cover");
 
-        // Then the rest, out of what the tranches below paid
+        // The rest waits for A to report. A has no loss of its own, so the keeper can do it
+        assertEq(trancheA.maxRedeem(alice), 0, "!maxRedeem before cover");
+        vm.prank(keeper);
+        trancheA.report();
+
+        // Then she takes out the rest, out of what the tranches below paid
         _shares = trancheA.balanceOf(alice);
         assertApproxEqAbs(trancheA.maxRedeem(alice), _shares, 2, "!maxRedeem after cover");
         vm.prank(alice);

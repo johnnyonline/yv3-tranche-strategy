@@ -257,12 +257,8 @@ contract TrancheStrategy is BaseHooks {
     function _freeFunds(
         uint256 _amount
     ) internal override {
-        // Get topped up by the junior tranches before anyone is paid out
-        _pullCover();
-
         // Redeem the vault shares that cover `_amount`
-        uint256 _shares = Math.min(VAULT.previewWithdraw(_amount), balanceOfVault());
-        VAULT.redeem(_shares, address(this), address(this));
+        VAULT.redeem(Math.min(VAULT.previewWithdraw(_amount), balanceOfVault()), address(this), address(this));
     }
 
     /// @inheritdoc BaseStrategy
