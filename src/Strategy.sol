@@ -5,7 +5,6 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
 import {BaseStrategy} from "@tokenized-strategy/BaseStrategy.sol";
-import {TokenizedStrategyLib as TokenizedStrategy} from "@tokenized-strategy/libraries/TokenizedStrategyLib.sol";
 import {BaseHooks, BaseHealthCheck, ERC20} from "@periphery/Bases/Hooks/BaseHooks.sol";
 import {IVault} from "@yearn-vaults/interfaces/IVault.sol";
 
@@ -261,7 +260,7 @@ contract TrancheStrategy is BaseHooks {
         _pullCover();
 
         // Pass a share of the profit down to the junior tranches
-        uint256 _owed = TokenizedStrategy.lastTotalAssets();
+        uint256 _owed = TokenizedStrategy.totalAssets();
         uint256 _held = balanceOfAsset() + valueOfVault();
         if (_held > _owed && address(junior) != address(0)) {
             uint256 _shares = VAULT.convertToShares((_held - _owed) * premium / MAX_BPS);
@@ -275,7 +274,7 @@ contract TrancheStrategy is BaseHooks {
     function _pullCover() internal {
         if (address(junior) == address(0)) return;
 
-        uint256 _owed = TokenizedStrategy.lastTotalAssets();
+        uint256 _owed = TokenizedStrategy.totalAssets();
         uint256 _held = balanceOfAsset() + valueOfVault();
         if (_held < _owed) junior.cover(_owed - _held);
     }
